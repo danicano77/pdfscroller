@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="ca"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="theme-color" content="#111418"><meta name="mobile-web-app-capable" content="yes">
+<link rel="manifest" href="manifest.webmanifest"><link rel="icon" href="icon.svg"><link rel="apple-touch-icon" href="icon-192.png">
+<title>PDF Scroll</title>
+<style>
+*{box-sizing:border-box}html,body{height:100%;margin:0;background:#111418;color:#e8eaed;font:15px system-ui,sans-serif;overscroll-behavior:none}
+#view{position:fixed;inset:0;overflow:auto;touch-action:pan-x pan-y;-webkit-overflow-scrolling:touch}
+#pages{display:flex;flex-direction:column;align-items:center;width:fit-content;min-width:100%;padding:8px 0 40vh}
+.pg{width:var(--w,100vw);margin:0 0 8px;background:#fff;position:relative;flex:none}
+.pg canvas,.pg img{display:block;width:100%;height:100%}
+#empty{position:fixed;inset:0;display:flex;flex-direction:column;gap:12px;align-items:center;justify-content:center;text-align:center;color:#9aa0a6;pointer-events:none;padding:20px}
+#empty b{font-size:20px;color:#e8eaed}
+#bar{position:fixed;left:50%;bottom:calc(10px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);display:flex;gap:6px;align-items:center;flex-wrap:wrap;justify-content:center;max-width:calc(100% - 16px);background:#202428ee;backdrop-filter:blur(8px);padding:8px 10px;border-radius:14px;box-shadow:0 4px 20px #0008;transition:opacity .3s}
+#bar.hide{opacity:0;pointer-events:none}
+button{background:#33393f;color:inherit;border:0;border-radius:9px;min-width:40px;height:40px;font-size:16px;padding:0 10px}
+button:active{background:#4a525a}#play{background:#1a73e8;min-width:48px}
+label{display:flex;align-items:center;gap:6px;font-size:13px}input[type=range]{width:110px}
+.v{min-width:48px;text-align:center;font-variant-numeric:tabular-nums;font-size:13px}
+#msg{position:fixed;top:10px;left:50%;transform:translateX(-50%);background:#202428;padding:6px 12px;border-radius:8px;display:none}
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/utif/3.1.0/UTIF.min.js"></script>
+</head><body>
+<div id="view"><div id="pages"></div></div>
+<div id="empty"><b>PDF Scroll</b><span>Obre o arrossega PDFs i imatges (JPG, PNG, TIFF, WebP…)</span></div>
+<div id="msg"></div>
+<div id="bar">
+<button id="open" title="Obrir">📂</button>
+<button id="play" title="Play/Pausa (espai)">▶</button>
+<label>Velocitat <input id="sp" type="range" min="5" max="400" step="1"><span class="v" id="spv"></span></label>
+<button id="zo">−</button><span class="v" id="zv"></span><button id="zi">+</button>
+<button id="fit" title="Ajusta a l'amplada">↔</button>
+<button id="top" title="Inici">⏮</button><button id="fs" title="Pantalla completa">⛶</button>
+<input id="file" type="file" multiple accept="application/pdf,image/*,.tif,.tiff,.pdf" hidden>
+</div>
+<script>
+const $=s=>document.querySelector(s),view=$('#view'),box=$('#pages'),bar=$('#bar');
+const ls=(k,d)=>{try{return +localStorage.getItem(k)||d}catch{return d}},sv=(k,v)=>{try{localStorage.setItem(k,v)}catch{}};
+let zoom=ls('z',1),speed=ls('s',40),playing=false,pages=[],last=0,pos=0,lastSet=-1,rt,idle,wl;
+pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+const msg=t=>{const m=$('#msg');m.textContent=t;m.style.display=t?'block':'none'};
+
+const io=new IntersectionObserver(es=>es.forEach(e=>{const p=e.target._p;p.vis=e.isIntersecting;e.isIntersecting?render(p):release(p)}),{root:view,rootMargin:'1500px 0px'});
+
+function css(){box.style.setProperty('--w',Math.round(view.clientWidth*zoom)+'px');$('#zv').textContent=Math.round(zoom*100)+'%'}
+function setZoom(z){z=Math.min(6,Math.max(.25,z));const r=view.scrollTop/(view.scrollHeight||1);zoom=z;css();view.scrollTop=r*view.scrollHeight;pos=view.scrollTop;sv('z',z);
+ clearTimeout(rt);rt=setTimeout(()=>pages.forEach(p=>p.vis&&render(p)),200)}
+function setSpeed(s){speed=Math.min(400,Math.max(5,s));$('#sp').value=speed;$('#spv').textContent=speed+' px/s';sv('s',speed)}
+
+function mk(w,h,src){const el=document.createElement('div');el.className='pg';el.style.aspectRatio=w+'/'+h;
+ const p={el,src,tok:0,vis:false,rw:0};el._p=p;pages.push(p);box.append(el);
+ if(src.node){el.append(src.node)}else io.observe(el)}
+
+async function render(p){const s=p.src;if(!s.pg)return;const cssW=p.el.clientWidth;if(p.rw===cssW)return;const tok=++p.tok;
+ let sc=cssW*Math.min(window.devicePixelRatio||1,3)/s.v.width;const px=s.v.width*s.v.height*sc*sc;if(px>18e6)sc*=Math.sqrt(18e6/px);
+ p.rt&&p.rt.cancel();const vp=s.pg.getViewport({scale:sc});
+ const c=document.createElement('canvas');c.width=Math.floor(vp.width);c.height=Math.floor(vp.height);
+ const t=s.pg.render({canvasContext:c.getContext('2d',{alpha:false}),viewport:vp});p.rt=t;
+ try{await t.promise}catch{return}
+ if(tok!==p.tok)return;p.el.replaceChildren(c);p.rw=cssW}
+function release(p){if(!p.src.pg)return;p.tok++;p.rt&&p.rt.cancel();p.el.replaceChildren();p.rw=0}
+
+async function addPdf(f){const doc=await pdfjsLib.getDocument({data:new Uint8Array(await f.arrayBuffer())}).promise;
+ for(let n=1;n<=doc.numPages;n++){msg(`${f.name}: ${n}/${doc.numPages}`);const pg=await doc.getPage(n),v=pg.getViewport({scale:1});mk(v.width,v.height,{pg,v})}}
+async function addTiff(f){const b=await f.arrayBuffer(),ifds=UTIF.decode(b);
+ for(const i of ifds){UTIF.decodeImage(b,i);const c=document.createElement('canvas');c.width=i.width;c.height=i.height;
+  c.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(UTIF.toRGBA8(i)),i.width,i.height),0,0);mk(i.width,i.height,{node:c})}}
+async function addImg(f){const img=new Image();img.src=URL.createObjectURL(f);await img.decode();mk(img.naturalWidth,img.naturalHeight,{node:img})}
+
+async function load(files){files=[...files];if(!files.length)return;stop();pages.forEach(p=>io.unobserve(p.el));pages=[];box.replaceChildren();$('#empty').style.display='none';view.scrollTop=0;pos=0;
+ for(const f of files){try{
+  if(/pdf$/i.test(f.type)||/\.pdf$/i.test(f.name))await addPdf(f);
+  else if(/tiff?$/i.test(f.type+f.name)){try{await addImg(f)}catch{await addTiff(f)}}
+  else await addImg(f)}catch(e){msg('Error: '+f.name);console.error(e);await new Promise(r=>setTimeout(r,1500))}}
+ msg('');if(!pages.length)$('#empty').style.display='flex'}
+
+function tick(t){if(!playing)return;const dt=Math.min((t-last)/1000,.1);last=t;
+ if(Math.abs(view.scrollTop-lastSet)>1.5)pos=view.scrollTop;
+ pos+=speed*dt;view.scrollTop=pos;lastSet=view.scrollTop;
+ if(pos>=view.scrollHeight-view.clientHeight-1&&pos>0){stop();return}requestAnimationFrame(tick)}
+async function play(){if(!pages.length)return;playing=true;$('#play').textContent='⏸';pos=view.scrollTop;lastSet=pos;last=performance.now();requestAnimationFrame(tick);
+ try{wl=await navigator.wakeLock?.request('screen')}catch{}wake()}
+function stop(){playing=false;$('#play').textContent='▶';try{wl?.release()}catch{}bar.classList.remove('hide')}
+const toggle=()=>playing?stop():play();
+function wake(){bar.classList.remove('hide');clearTimeout(idle);if(playing)idle=setTimeout(()=>bar.classList.add('hide'),3500)}
+
+$('#open').onclick=()=>$('#file').click();$('#file').onchange=e=>{load(e.target.files);e.target.value=''};
+$('#play').onclick=toggle;$('#sp').oninput=e=>setSpeed(+e.target.value);
+$('#zi').onclick=()=>setZoom(zoom*1.15);$('#zo').onclick=()=>setZoom(zoom/1.15);$('#fit').onclick=()=>setZoom(1);
+$('#top').onclick=()=>{view.scrollTop=0;pos=0};
+$('#fs').onclick=()=>document.fullscreenElement?document.exitFullscreen():document.documentElement.requestFullscreen?.();
+addEventListener('dragover',e=>e.preventDefault());addEventListener('drop',e=>{e.preventDefault();load(e.dataTransfer.files)});
+addEventListener('keydown',e=>{wake();if(e.target.tagName==='INPUT'&&e.target.type!=='range')return;
+ if(e.code==='Space'){e.preventDefault();toggle()}else if(e.key==='ArrowUp'&&e.shiftKey){setSpeed(speed+5)}else if(e.key==='ArrowDown'&&e.shiftKey){setSpeed(speed-5)}
+ else if(e.key==='+'||e.key==='=')setZoom(zoom*1.15);else if(e.key==='-')setZoom(zoom/1.15);else if(e.key==='0')setZoom(1);else if(e.key==='Home'){view.scrollTop=0}});
+view.addEventListener('wheel',e=>{if(e.ctrlKey){e.preventDefault();setZoom(zoom*(e.deltaY<0?1.1:.91))}},{passive:false});
+let pd=0,pz=1;const dist=e=>Math.hypot(e.touches[0].clientX-e.touches[1].clientX,e.touches[0].clientY-e.touches[1].clientY);
+view.addEventListener('touchstart',e=>{if(e.touches.length===2){pd=dist(e);pz=zoom}},{passive:true});
+view.addEventListener('touchmove',e=>{if(e.touches.length===2&&pd){e.preventDefault();setZoom(pz*dist(e)/pd)}},{passive:false});
+view.addEventListener('touchend',e=>{if(e.touches.length<2)pd=0},{passive:true});
+['pointerdown','pointermove'].forEach(t=>addEventListener(t,wake));
+addEventListener('resize',()=>{css();clearTimeout(rt);rt=setTimeout(()=>pages.forEach(p=>p.vis&&render(p)),250)});
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'&&playing)play()});
+css();setSpeed(speed);
+if('serviceWorker'in navigator&&/^https:|localhost/.test(location.protocol+location.hostname))navigator.serviceWorker.register('sw.js');
+</script></body></html>
