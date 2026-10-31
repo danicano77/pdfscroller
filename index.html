@@ -7,7 +7,7 @@
 <style>
 *{box-sizing:border-box}html,body{height:100%;margin:0;background:#111418;color:#e8eaed;font:15px system-ui,sans-serif;overscroll-behavior:none}
 #view{position:fixed;inset:0;overflow:auto;touch-action:pan-x pan-y;-webkit-overflow-scrolling:touch}
-#pages{display:flex;flex-direction:column;align-items:center;width:fit-content;min-width:100%;padding:8px 0 40vh}
+#pages{position:relative;display:flex;flex-direction:column;align-items:center;width:fit-content;min-width:100%;padding:8px 0 40vh}
 .pg{width:var(--w,100vw);margin:0 0 8px;background:#fff;position:relative;flex:none}
 .pg canvas,.pg img{display:block;width:100%;height:100%}
 #empty{position:fixed;inset:0;display:flex;flex-direction:column;gap:12px;align-items:center;justify-content:center;text-align:center;color:#9aa0a6;pointer-events:none;padding:20px}
@@ -18,6 +18,11 @@ button{background:#33393f;color:inherit;border:0;border-radius:9px;min-width:40p
 button:active{background:#4a525a}#play{background:#1a73e8;min-width:48px}
 label{display:flex;align-items:center;gap:6px;font-size:13px}input[type=range]{width:110px}
 .v{min-width:48px;text-align:center;font-variant-numeric:tabular-nums;font-size:13px}
+#arow{display:none;width:100%;gap:6px;align-items:center}#arow input{flex:1;min-width:80px}
+select{background:#33393f;color:inherit;border:0;border-radius:9px;height:40px;padding:0 6px}
+#mk{position:absolute;inset:0;pointer-events:none;z-index:5}.m{position:absolute;left:0;right:0;border-top:2px solid #ff5252}
+.m span{position:absolute;left:0;top:-24px;background:#ff5252;color:#fff;font-size:12px;padding:3px 7px;border-radius:0 7px 7px 0;pointer-events:auto;white-space:nowrap}.m i{font-style:normal;margin-left:6px;opacity:.8}
+.marking #view{cursor:crosshair}
 #msg{position:fixed;top:10px;left:50%;transform:translateX(-50%);background:#202428;padding:6px 12px;border-radius:8px;display:none}
 </style>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
@@ -29,22 +34,25 @@ label{display:flex;align-items:center;gap:6px;font-size:13px}input[type=range]{w
 <div id="bar">
 <button id="open" title="Obrir">📂</button>
 <button id="play" title="Play/Pausa (espai)">▶</button>
-<label>Velocitat <input id="sp" type="range" min="5" max="400" step="1"><span class="v" id="spv"></span></label>
+<label id="sl">Velocitat <input id="sp" type="range" min="5" max="400" step="1"><span class="v" id="spv"></span></label>
 <button id="zo">−</button><span class="v" id="zv"></span><button id="zi">+</button>
 <button id="fit" title="Ajusta a l'amplada">↔</button>
 <button id="top" title="Inici">⏮</button><button id="fs" title="Pantalla completa">⛶</button>
-<input id="file" type="file" multiple accept="application/pdf,image/*,.tif,.tiff,.pdf" hidden>
+<div id="arow"><button id="mark">● Marcar</button><input id="as" type="range" min="0" max="1000" value="0"><span class="v" id="at" style="min-width:84px">0:00</span>
+<select id="rate"><option value=".5">50%</option><option value=".75">75%</option><option value="1" selected>100%</option></select><button id="clr" title="Esborra marques">🗑</button></div>
+<input id="file" type="file" multiple accept="application/pdf,image/*,audio/*,.tif,.tiff,.pdf,.mp3,.wav,.m4a,.flac,.ogg" hidden>
 </div>
 <script>
 const $=s=>document.querySelector(s),view=$('#view'),box=$('#pages'),bar=$('#bar');
 const ls=(k,d)=>{try{return +localStorage.getItem(k)||d}catch{return d}},sv=(k,v)=>{try{localStorage.setItem(k,v)}catch{}};
+const au=new Audio();au.preservesPitch=true;let anchors=[],marking=false,hold=0,hasAudio=false,audioName='',docName='';
 let zoom=ls('z',1),speed=ls('s',40),playing=false,pages=[],last=0,pos=0,lastSet=-1,rt,idle,wl;
 pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 const msg=t=>{const m=$('#msg');m.textContent=t;m.style.display=t?'block':'none'};
 
 const io=new IntersectionObserver(es=>es.forEach(e=>{const p=e.target._p;p.vis=e.isIntersecting;e.isIntersecting?render(p):release(p)}),{root:view,rootMargin:'1500px 0px'});
 
-function css(){box.style.setProperty('--w',Math.round(view.clientWidth*zoom)+'px');$('#zv').textContent=Math.round(zoom*100)+'%'}
+function css(){box.style.setProperty('--w',Math.round(view.clientWidth*zoom)+'px');$('#zv').textContent=Math.round(zoom*100)+'%';drawMarks()}
 function setZoom(z){z=Math.min(6,Math.max(.25,z));const r=view.scrollTop/(view.scrollHeight||1);zoom=z;css();view.scrollTop=r*view.scrollHeight;pos=view.scrollTop;sv('z',z);
  clearTimeout(rt);rt=setTimeout(()=>pages.forEach(p=>p.vis&&render(p)),200)}
 function setSpeed(s){speed=Math.min(400,Math.max(5,s));$('#sp').value=speed;$('#spv').textContent=speed+' px/s';sv('s',speed)}
@@ -69,20 +77,21 @@ async function addTiff(f){const b=await f.arrayBuffer(),ifds=UTIF.decode(b);
   c.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(UTIF.toRGBA8(i)),i.width,i.height),0,0);mk(i.width,i.height,{node:c})}}
 async function addImg(f){const img=new Image();img.src=URL.createObjectURL(f);await img.decode();mk(img.naturalWidth,img.naturalHeight,{node:img})}
 
-async function load(files){files=[...files];if(!files.length)return;stop();pages.forEach(p=>io.unobserve(p.el));pages=[];box.replaceChildren();$('#empty').style.display='none';view.scrollTop=0;pos=0;
+async function load(files){files=[...files];const aus=files.filter(f=>/^audio\//.test(f.type)||/\.(mp3|wav|m4a|ogg|flac|aac|opus)$/i.test(f.name));files=files.filter(f=>!aus.includes(f));
+ if(aus.length)setAudio(aus[0]);if(!files.length)return;docName=files[0].name;stop();pages.forEach(p=>io.unobserve(p.el));pages=[];box.replaceChildren();$('#empty').style.display='none';view.scrollTop=0;pos=0;
  for(const f of files){try{
   if(/pdf$/i.test(f.type)||/\.pdf$/i.test(f.name))await addPdf(f);
   else if(/tiff?$/i.test(f.type+f.name)){try{await addImg(f)}catch{await addTiff(f)}}
   else await addImg(f)}catch(e){msg('Error: '+f.name);console.error(e);await new Promise(r=>setTimeout(r,1500))}}
- msg('');if(!pages.length)$('#empty').style.display='flex'}
+ msg('');if(!pages.length)$('#empty').style.display='flex';loadAnchors()}
 
-function tick(t){if(!playing)return;const dt=Math.min((t-last)/1000,.1);last=t;
+function tick(t){if(!playing)return;if(hasAudio){follow();requestAnimationFrame(tick);return}const dt=Math.min((t-last)/1000,.1);last=t;
  if(Math.abs(view.scrollTop-lastSet)>1.5)pos=view.scrollTop;
  pos+=speed*dt;view.scrollTop=pos;lastSet=view.scrollTop;
  if(pos>=view.scrollHeight-view.clientHeight-1&&pos>0){stop();return}requestAnimationFrame(tick)}
-async function play(){if(!pages.length)return;playing=true;$('#play').textContent='⏸';pos=view.scrollTop;lastSet=pos;last=performance.now();requestAnimationFrame(tick);
+async function play(){if(!pages.length&&!hasAudio)return;if(hasAudio)au.play();playing=true;$('#play').textContent='⏸';pos=view.scrollTop;lastSet=pos;last=performance.now();requestAnimationFrame(tick);
  try{wl=await navigator.wakeLock?.request('screen')}catch{}wake()}
-function stop(){playing=false;$('#play').textContent='▶';try{wl?.release()}catch{}bar.classList.remove('hide')}
+function stop(){playing=false;if(hasAudio)au.pause();$('#play').textContent='▶';try{wl?.release()}catch{}bar.classList.remove('hide')}
 const toggle=()=>playing?stop():play();
 function wake(){bar.classList.remove('hide');clearTimeout(idle);if(playing)idle=setTimeout(()=>bar.classList.add('hide'),3500)}
 
@@ -103,6 +112,33 @@ view.addEventListener('touchend',e=>{if(e.touches.length<2)pd=0},{passive:true})
 ['pointerdown','pointermove'].forEach(t=>addEventListener(t,wake));
 addEventListener('resize',()=>{css();clearTimeout(rt);rt=setTimeout(()=>pages.forEach(p=>p.vis&&render(p)),250)});
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'&&playing)play()});
+/* ---- sincronització àudio ↔ partitura (per línia) ---- */
+const fmt=s=>{s=Math.max(0,s||0);return Math.floor(s/60)+':'+String(Math.floor(s%60)).padStart(2,'0')};
+const skey=()=>'sync:'+audioName+'|'+docName;
+const save=()=>{try{localStorage.setItem(skey(),JSON.stringify(anchors))}catch{}};
+function loadAnchors(){try{anchors=JSON.parse(localStorage.getItem(skey())||'[]')}catch{anchors=[]}drawMarks()}
+function setAudio(f){if(au.src)URL.revokeObjectURL(au.src);au.src=URL.createObjectURL(f);audioName=f.name;hasAudio=true;au.playbackRate=+$('#rate').value;
+ $('#arow').style.display='flex';$('#sl').style.display='none';loadAnchors()}
+const yOf=a=>{const p=pages[a.pi];return p?p.el.offsetTop+a.f*p.el.offsetHeight:0};
+function follow(){if(marking||!anchors.length||performance.now()<hold)return;const t=au.currentTime,n=anchors.length;let y;
+ if(t<=anchors[0].t)y=yOf(anchors[0]);else if(t>=anchors[n-1].t)y=yOf(anchors[n-1]);
+ else{let i=1;while(anchors[i].t<t)i++;const a=anchors[i-1],b=anchors[i],ya=yOf(a);y=ya+(yOf(b)-ya)*(t-a.t)/(b.t-a.t)}
+ view.scrollTop=Math.max(0,y-view.clientHeight*.3)}
+function drawMarks(){let m=$('#mk');if(!m){m=document.createElement('div');m.id='mk';box.prepend(m)}m.replaceChildren();
+ anchors.forEach((a,i)=>{const p=pages[a.pi];if(!p)return;const d=document.createElement('div');d.className='m';d.style.top=(p.el.offsetTop+a.f*p.el.offsetHeight)+'px';
+  d.innerHTML=`<span><b data-s="${i}">${fmt(a.t)}</b><i data-d="${i}">✕</i></span>`;m.append(d)})}
+function addAnchor(e){const y=e.clientY-view.getBoundingClientRect().top+view.scrollTop;let pi=-1;pages.forEach((p,i)=>{if(p.el.offsetTop<=y)pi=i});if(pi<0)return;
+ const p=pages[pi],f=Math.min(1,Math.max(0,(y-p.el.offsetTop)/p.el.offsetHeight));anchors.push({t:au.currentTime,pi,f});anchors.sort((a,b)=>a.t-b.t);save();drawMarks()}
+view.addEventListener('click',e=>{const d=e.target.dataset;if(d&&d.d!==undefined){anchors.splice(+d.d,1);save();drawMarks();return}
+ if(d&&d.s!==undefined){au.currentTime=anchors[+d.s].t;return}if(marking&&hasAudio)addAnchor(e)});
+$('#mark').onclick=()=>{marking=!marking;$('#mark').style.background=marking?'#d93025':'';$('#mark').textContent=marking?'● Marcant':'● Marcar';
+ document.body.classList.toggle('marking',marking);msg(marking?'Toca el principi de cada línia quan soni':'')};
+$('#clr').onclick=()=>{if(anchors.length&&confirm('Esborrar totes les marques?')){anchors=[];save();drawMarks()}};
+$('#rate').onchange=e=>au.playbackRate=+e.target.value;
+$('#as').oninput=e=>{au.currentTime=e.target.value/1000*(au.duration||0)};
+au.ontimeupdate=()=>{$('#as').value=au.currentTime/(au.duration||1)*1000;$('#at').textContent=fmt(au.currentTime)+' / '+fmt(au.duration)};
+au.onseeked=follow;au.onended=stop;
+['wheel','touchmove'].forEach(t=>view.addEventListener(t,()=>{hold=performance.now()+2500},{passive:true}));
 css();setSpeed(speed);
 if('serviceWorker'in navigator&&/^https:|localhost/.test(location.protocol+location.hostname))navigator.serviceWorker.register('sw.js');
 </script></body></html>
